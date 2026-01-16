@@ -574,6 +574,18 @@ checkpoint_47() {
 run_checkpoint 47 "sudo -E emerge sys-apps/bubblewrap" checkpoint_47
 # Fix for long term
 checkpoint_48() {
+    # Mask LLVM 21 to prevent version conflicts with LLVM 20
+    # See: https://github.com/shadowed1/Chard/issues/2
+    sudo mkdir -p /etc/portage/package.mask
+    sudo tee -a /etc/portage/package.mask/llvm >/dev/null <<'EOF'
+>=sys-devel/llvm-21
+>=llvm-core/libclc-21
+>=llvm-runtimes/libcxx-21
+>=llvm-runtimes/libcxxabi-21
+EOF
+    # Use SMRT to optimize parallel builds for resource-intensive LLVM/clang compilation
+    SMRT 90
+    source /$CHARD_HOME/.smrt_env.sh 2>/dev/null
     sudo -E emerge -v =llvm-core/libclc-20*
     sudo -E emerge llvm-runtimes/libcxx
     sudo -E emerge llvm-runtimes/libcxxabi
