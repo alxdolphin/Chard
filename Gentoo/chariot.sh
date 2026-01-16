@@ -572,23 +572,101 @@ checkpoint_47() {
     eclean-dist -d
 }
 run_checkpoint 47 "sudo -E emerge sys-apps/bubblewrap" checkpoint_47
-# Fix for long term
+# Optimized for Mediatek aarch64 - Use binaries when possible, optimize compilation if needed
 checkpoint_48() {
     # Mask LLVM 21 to prevent version conflicts with LLVM 20
     # See: https://github.com/shadowed1/Chard/issues/2
     sudo mkdir -p /etc/portage/package.mask
-    sudo tee -a /etc/portage/package.mask/llvm >/dev/null <<'EOF'
+    sudo tee /etc/portage/package.mask/llvm >/dev/null <<'EOF'
+# Mask all LLVM 21 packages by slot
+llvm-core/llvm:21
+llvm-core/clang:21
+llvm-core/libclc:21
+llvm-runtimes/libcxx:21
+llvm-runtimes/libcxxabi:21
+llvm-runtimes/compiler-rt:21
+llvm-runtimes/clang-runtime:21
+llvm-runtimes/openmp:21
+# Also mask by version as fallback
 >=sys-devel/llvm-21
+>=llvm-core/llvm-21
+>=llvm-core/llvm-common-21
+>=llvm-core/clang-21
+>=llvm-core/clang-common-21
 >=llvm-core/libclc-21
 >=llvm-runtimes/libcxx-21
 >=llvm-runtimes/libcxxabi-21
+>=llvm-runtimes/compiler-rt-21
+>=llvm-runtimes/clang-runtime-21
+>=llvm-runtimes/openmp-21
 EOF
-    # Use SMRT to optimize parallel builds for resource-intensive LLVM/clang compilation
-    SMRT 90
+    
+    # Optimize LLVM_TARGETS for aarch64 - only build what's needed
+    # This significantly reduces compile time for Mediatek aarch64 devices
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "aarch64" ]]; then
+        sudo mkdir -p /etc/portage/package.use
+        # Limit LLVM targets to AArch64 only (faster compilation)
+        # Note: This may require some packages to be rebuilt, but saves significant time
+        # Syntax: package-name USE_FLAG value
+        echo "sys-devel/llvm LLVM_TARGETS (AArch64)" | sudo tee -a /etc/portage/package.use/llvm-optimize >/dev/null
+        echo "llvm-core/llvm LLVM_TARGETS (AArch64)" | sudo tee -a /etc/portage/package.use/llvm-optimize >/dev/null
+        echo "llvm-core/clang LLVM_TARGETS (AArch64)" | sudo tee -a /etc/portage/package.use/llvm-optimize >/dev/null
+        echo "llvm-core/libclc LLVM_TARGETS (AArch64)" | sudo tee -a /etc/portage/package.use/llvm-optimize >/dev/null
+    fi
+    
+    # Configure binhost for binary packages (much faster than compilation)
+    # Gentoo's official binhost provides LLVM binaries for aarch64/arm64
+    ARCH=$(uname -m)
+    
+    # Enable getbinpkg feature in make.conf if not already present
+    if ! grep -q "getbinpkg" /etc/portage/make.conf 2>/dev/null; then
+        sudo sed -i '/^FEATURES=/ s/"$/ getbinpkg"/' /etc/portage/make.conf 2>/dev/null || \
+        echo 'FEATURES="${FEATURES} getbinpkg"' | sudo tee -a /etc/portage/make.conf >/dev/null
+    fi
+    
+    # Configure PORTAGE_BINHOST based on architecture
+    if [[ "$ARCH" == "aarch64" ]]; then
+        # Gentoo's official binhost for aarch64/arm64
+        BINHOST_URL="https://distfiles.gentoo.org/releases/arm64/binpackages/23.0/arm64/"
+        # Add to make.conf if not already present
+        if ! grep -q "PORTAGE_BINHOST" /etc/portage/make.conf 2>/dev/null; then
+            echo "PORTAGE_BINHOST=\"$BINHOST_URL\"" | sudo tee -a /etc/portage/make.conf >/dev/null
+        else
+            sudo sed -i "s|^PORTAGE_BINHOST=.*|PORTAGE_BINHOST=\"$BINHOST_URL\"|" /etc/portage/make.conf
+        fi
+        export PORTAGE_BINHOST="$BINHOST_URL"
+        echo "Configured binhost for aarch64: $PORTAGE_BINHOST"
+    elif [[ "$ARCH" == "x86_64" ]]; then
+        # Gentoo's official binhost for x86_64/amd64
+        BINHOST_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/amd64/"
+        if ! grep -q "PORTAGE_BINHOST" /etc/portage/make.conf 2>/dev/null; then
+            echo "PORTAGE_BINHOST=\"$BINHOST_URL\"" | sudo tee -a /etc/portage/make.conf >/dev/null
+        else
+            sudo sed -i "s|^PORTAGE_BINHOST=.*|PORTAGE_BINHOST=\"$BINHOST_URL\"|" /etc/portage/make.conf
+        fi
+        export PORTAGE_BINHOST="$BINHOST_URL"
+        echo "Configured binhost for x86_64: $PORTAGE_BINHOST"
+    fi
+    
+    # Try to use binary packages first (much faster than compilation)
+    # --usepkg tries to use local binary packages, --getbinpkg downloads from binhost
+    # If binaries aren't available, fall back to compilation with SMRT optimization
+    echo "Attempting to install LLVM packages (preferring binaries if available)..."
+    
+    # Use SMRT for parallel builds if compilation is needed
+    # For aarch64 devices, use slightly lower percentage to avoid memory issues
+    if [[ "$ARCH" == "aarch64" ]]; then
+        SMRT 75  # Lower for aarch64 to avoid OOM
+    else
+        SMRT 90
+    fi
     source /$CHARD_HOME/.smrt_env.sh 2>/dev/null
-    sudo -E emerge -v =llvm-core/libclc-20*
-    sudo -E emerge llvm-runtimes/libcxx
-    sudo -E emerge llvm-runtimes/libcxxabi
+    
+    # Use --usepkg --getbinpkg to prefer binaries but allow compilation if needed
+    sudo -E emerge --usepkg --getbinpkg -v =llvm-core/libclc-20*
+    sudo -E emerge --usepkg --getbinpkg llvm-runtimes/libcxx llvm-runtimes/libcxxabi
+    
     rm -rf /var/tmp/portage/llvm-core/libclc-*
     rm -rf /var/tmp/portage/llvm-runtimes/libcxx-*
     rm -rf /var/tmp/portage/llvm-runtimes/libcxxabi-*
